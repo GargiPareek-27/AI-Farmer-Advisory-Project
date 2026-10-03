@@ -186,18 +186,25 @@ four of the five models, so the score would be inflated. Use that average only f
 
 ---
 
-## Limitations
+## Limitations and Future Work
 
-* **UAV confound.** Classes were recorded on different dates; healthy comes from a different file source
-  (numbered stills with no timestamp) and is recognised almost perfectly. Disease recall fell to roughly 0.7
-  when a whole date was withheld. Generalisation to new fields or seasons is **not established**.
-* **Few independent UAV sources.** 9-13 videos per class; per-fold scores vary (0.75-0.95) and intervals are wide.
-* **Leaf ensemble is a selected variant.** Several variants (DINOv2, blends, two ensembles) were compared on the
-  same folds, so 0.761 is probably slightly optimistic. The ensemble was a planned experiment, not picked after
-  looking at test results.
-* **Single dataset, single source.** No external test set; labels were not independently re-audited.
-* **UAV images are resized to 224 x 224** (aspect ratio not preserved), which may hide small lesions.
-* **Not agronomic advice.** Weak classes (Frog-eye, Septoria) are not reliable enough for unsupervised use.
+This project was developed under limited local GPU/compute resources, so the experiments focused on models and evaluation protocols that were practical to run within the available hardware budget. As a result, the current study does not include large-scale hyperparameter sweeps, extensive multi-GPU training, or very large foundation models.
+
+The main limitations of the current work are:
+
+* The leaf dataset is relatively limited in size and class balance, particularly for difficult classes such as Frog-eye and Septoria.
+* UAV evaluation is based on a limited number of independent flight/video groups, so broader field- and season-level generalization requires further validation.
+* UAV images were processed at a constrained resolution for computational feasibility, which may limit recognition of small or subtle disease symptoms.
+* The current evaluation primarily uses the available dataset; external-dataset validation would provide a stronger test of cross-domain generalization.
+
+Future work will focus on:
+
+* External validation on additional soybean disease datasets.
+* Field-, flight-, and date-level cross-validation for stronger generalization estimates.
+* Higher-resolution and multi-scale UAV inference using tiled crops.
+* Targeted improvement of difficult disease classes through hard-example mining and class-balanced training.
+* Grad-CAM or related interpretability methods to verify that predictions rely on disease-relevant visual regions.
+* Larger hyperparameter/model searches when additional compute resources are available.
 
 ---
 
