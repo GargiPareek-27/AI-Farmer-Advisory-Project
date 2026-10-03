@@ -208,11 +208,15 @@ four of the five models, so the score would be inflated. Use that average only f
 * Every test-set evaluation is appended to `reports/<split>/test_eval_log.txt`; tuning on test shows up there.
 * Pretrained weights are torchvision ImageNet weights, downloaded automatically.
 
-## Data and credits
+## Data and Credits
 
-Dataset: *MH-SoyaHealthVision: An Indian UAV and Leaf Image Dataset for Integrated Crop Health Assessment*, Mendeley Data
-([dataset authors and licence: add here]). Please cite the dataset if you use this work.
+Dataset: *MH-SoyaHealthVision: An Indian UAV and Leaf Image Dataset for Integrated Crop Health Assessment* by Sayali Shinde and Dr. Vahida Attar, Mendeley Data, Version 1, DOI: [10.17632/hkbgh5s3b7.1](https://doi.org/10.17632/hkbgh5s3b7.1).
+
+The dataset is made available under the **Creative Commons Attribution 4.0 International (CC BY 4.0)** licence. Please refer to the original dataset record for the complete licence terms and attribution requirements.
 
 ## Licence
 
-[Add your licence here. The dataset has its own licence terms.]
+The **code in this repository** is released under the **MIT License**.
+
+The dataset used by this project is **not covered by the MIT License** and remains subject to its original **CC BY 4.0** licence and attribution requirements.
+
