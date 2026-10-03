@@ -1,75 +1,38 @@
 # Soybean Disease Recognition from Leaf Photos and UAV Frames
 
-Leakage-safe, reproducible machine-learning pipeline for the **MH-SoyaHealthVision** dataset (an Indian UAV and leaf image dataset for crop health assessment, Mendeley Data).
+A leakage-aware machine-learning pipeline for the **MH-SoyaHealthVision** dataset (Indian UAV and leaf images for crop health assessment, Mendeley Data).
 
-It trains and honestly evaluates classifiers on two image sets:
+It cleans and splits the data, builds hand-crafted and frozen-CNN features, trains classical models and a fine-tuned CNN, and evaluates once on a held-out test split.
 
-| Set | Task | Images (after cleaning) | Classes |
+| Set | Task | Images after cleaning | Classes |
 |---|---|---|---|
-| Leaf | Close-up leaf photos | 2,756 | 6: Healthy, Rust, Mosaic, Septoria brown spot, Frog-eye leaf spot, Caterpillar/Semilooper pest attack |
-| UAV | Top-down drone frames (3840×2160) | 2,831 | 4: Healthy, Rust, Mosaic, Semilooper pest attack |
+| Leaf | Close-up leaf photos | 2,756 (of 2,782) | 6: Healthy, Rust, Mosaic, Septoria brown spot, Frog-eye leaf spot, Caterpillar/Semilooper pest attack |
+| UAV | Top-down drone frames (3840×2160) | 2,831 (of 2,842) | 4: Healthy, Rust, Mosaic, Semilooper pest attack |
 
-> **Honest summary:** Leaf recognition reaches **0.76 macro-F1** under leakage-checked 5-fold cross-validation. UAV scores are higher (0.88–0.91) but are **not** evidence of generalisation to new fields or seasons, because the classes are strongly associated with recording dates/sessions and the available UAV data contains only a small number of independent videos. The audit measures how far those numbers can be trusted.
+> **Scope of this README.** It documents the code that is committed in this repository: a **single stratified, cluster-aware train / val / test split** with model selection on val and one final test evaluation.
+>
+> The results in `soya_run.ipynb` (5-fold leaf CV, UAV grouped CV, audit, ensembles) were produced by an **extended version of the pipeline that is not in this repo**. See [What is not in this repo](#what-is-not-in-this-repo) before trying to run the notebook.
 
 ---
 
-## Results
+## Pipeline
 
-### Leaf (5-fold stratified cross-validation, every image tested exactly once, n = 2,756)
+```
+raw images
+   │ 01_build_manifest.py   validate, de-duplicate, cluster near-duplicates, split
+   ▼
+manifest.csv ── classes.json ── dropped.csv
+   │ 02_cache_images.py     decode + resize once → uint8 .npy per split
+   │ 03_eda.py              tables and figures (content stats on TRAIN only)
+   │ 04_extract_features.py hand-crafted (90) + frozen-CNN embeddings
+   │ 05_train_classical.py  LogReg / SVC / RF / HistGB, pick best on VAL
+   │ 06_finetune_cnn.py     transfer-learning fine-tune, best epoch on VAL
+   ▼
+07_evaluate_test.py         one-shot TEST evaluation (full metric suite)
+08_predict.py               inference on new images / folders / UAV tiles
+```
 
-Pooled out-of-fold macro-F1 with a 95 % confidence interval obtained using bootstrap resampling over clusters.
-
-| Model | Macro-F1 | 95 % CI | Accuracy |
-|---|---|---|---|
-| Classical (hand-crafted + frozen MobileNetV3 features; best feature/model configuration per fold) | 0.690 | 0.671 - 0.709 | 0.724 |
-| DINOv2-S/14 frozen features + SVC | 0.684 | 0.665 - 0.702 | — |
-| EfficientNet-B0, 320 px, flip TTA | 0.733 | 0.716 - 0.749 | 0.747 |
-| + CutMix variant (ensemble of 2) | 0.742 | 0.726 - 0.760 | 0.756 |
-| EfficientNet-B0 + B0/CutMix + ConvNeXt-Tiny (ensemble of 3) | **0.761** | 0.744 - 0.778 | 0.775 |
-
-The 3-model ensemble improved over the single EfficientNet-B0 on all five folds:
-
-- Ensemble: 0.748 - 0.766
-- EfficientNet-B0: 0.721 - 0.747
-
-The final pooled result is **macro-F1 = 0.7606** and **accuracy = 0.7747**.
-
-Per-class F1 of the 3-model ensemble:
-
-| Class | F1 | Comment |
-|---|---|---|
-| Healthy | 0.998 | essentially perfect |
-| Mosaic | 0.836 | |
-| Rust | 0.782 | frequent confusion target |
-| Caterpillar / Semilooper | 0.761 | confused with mosaic and rust |
-| Septoria brown spot | 0.623 | precision 0.55, recall 0.72 |
-| Frog-eye leaf spot | 0.564 | 38 of 168 predicted as rust |
-
-Remaining errors are concentrated among visually similar disease categories, especially Rust, Septoria brown spot and Frog-eye leaf spot.
-
-### UAV (grouped 3-fold cross-validation by video, n = 2,831)
-
-| Evaluation | Macro-F1 | Note |
-|---|---|---|
-| CNN (MobileNetV3-Large, 224 px) | 0.876 (CI 0.74 - 0.96) | folds 0.91 / 0.95 / 0.75 |
-| Classical features + HistGradientBoosting | 0.909 (CI 0.83 - 0.96) | folds 0.92 / 0.93 / 0.85 |
-| Training-free 1-NN lookup on frozen features | 0.873 (mean of folds) | folds 0.87 / 0.92 / 0.83 |
-| Mean-RGB-only probe (3 numbers per image) | 0.65 - 0.72 | chance = 0.25 |
-| Leave-one-date-out recall (large blocks) | 0.67 - 0.76 | deep features; small blocks can fall to 0.00 - 0.08 |
-
-**Reading this table:** the training-free nearest-neighbour lookup performs similarly to the trained CNN, and performance drops when an entire recording date is withheld. The UAV results therefore describe performance on new videos under similar field/acquisition conditions, not demonstrated generalisation to unseen fields or seasons.
-
----
-
-## Why this pipeline exists: leakage
-
-The first version of this project reported UAV macro-F1 of about 0.99. That result was discarded after investigating the data.
-
-- UAV frames are consecutive frames from a small number of videos. Random frame-level splitting allowed near-identical frames from the same video to appear in both training and evaluation. In the original audit, about 90 % of validation/test frames shared a video with training, nearest-train similarity was about 0.98, and a training-free 1-NN lookup reached about 0.997 macro-F1.
-- Perceptual hashing alone did not completely solve the problem. The final pipeline combines perceptual-hash similarity with video/flight identifiers parsed from file names, keeping correlated frames from the same source together.
-- Even after video-aware grouping, the UAV classes remain strongly associated with recording sessions/dates. Only a small amount of date overlap exists between classes, so a model can partially exploit acquisition/session characteristics rather than disease appearance.
-- The audit therefore includes nearest-neighbour similarity, a mean-RGB probe and leave-one-date-out analysis.
-- Leaf images showed no meaningful near-duplicate problem under the same analysis, and the leakage-checked 5-fold leaf result is used as the project's main headline result.
+Every script takes `--dataset {leaf,uav}`, `--data-root` (or env `SOYA_ROOT`), `--artifacts`, `--img-size` (default 224), `--seed` (default 42) and `--n-jobs`.
 
 ---
 
@@ -77,229 +40,186 @@ The first version of this project reported UAV macro-F1 of about 0.99. That resu
 
 ```
 soya_pipeline/
-  common.py                 CLI arguments, artifact paths, fold logic, cache/feature loaders
-  metrics.py                softmax, ECE, cluster-bootstrap confidence interval
+  common.py                 CLI arguments, artifact paths, seeding, manifest/cache/feature loaders
   features.py               90 hand-crafted colour / vegetation-index / texture features
-  models.py                 torchvision backbones, embedding extraction, checkpoints
-  01_build_manifest.py      validate, de-duplicate, group, split, make CV folds
-  02_cache_images.py        decode + resize every image once into one uint8 array
-  03_eda.py                 tables and figures about the data
-  04_extract_features.py    hand-crafted + frozen-CNN features for all images
-  05_audit_split.py         leakage / shortcut audit of the active split
-  06_train_classical.py     LogReg / SVC / RF / HistGB on features
-  07_finetune_cnn.py        transfer-learning fine-tune of a CNN
-  08_evaluate.py            full metric suite on val or test; ensembles; TTA
-  09_cv_summary.py          pooled out-of-fold results over all folds
-  10_predict.py             inference on new images (single model or ensemble)
+  models.py                 torchvision backbones, embeddings, batched inference, checkpoints
+  01_build_manifest.py      validate, de-duplicate, cluster, split
+  02_cache_images.py        decode + resize every image once
+  03_eda.py                 EDA tables and figures
+  04_extract_features.py    hand-crafted + frozen-CNN features for every split
+  05_train_classical.py     classical models on features
+  06_finetune_cnn.py        CNN fine-tuning
+  07_evaluate_test.py       metrics, confusion matrices, bootstrap CI, test log
+  08_predict.py             inference (file, folder, tiled UAV frame)
   run_all.sh                end-to-end driver
   make_dummy_data.py        tiny synthetic dataset for smoke tests
   requirements.txt
-  soya_run.ipynb            Colab notebook that calls the scripts
   docs/ENGINEERING_DECISIONS.md
-                            what every file does and why it was built that way
 ```
 
-All outputs go to `artifacts/<dataset>/` (manifest, cache, features, models, reports).
+The notebook `soya_run.ipynb` sits at the repository root.
 
-See `docs/ENGINEERING_DECISIONS.md` for the artifact layout and engineering rationale.
+All outputs go to `artifacts/<dataset>/` (git-ignored). See [docs/ENGINEERING_DECISIONS.md](docs/ENGINEERING_DECISIONS.md) for the layout and design rationale.
 
 ---
 
-## Quick start (Google Colab, T4 GPU)
+## Quick start
 
-1. Download the dataset from Mendeley Data and unzip so that these two folders exist side by side:
+### 1. Get the data
 
-   `Soyabean_Leaf_Image_Dataset/` and `Soyabean_UAV-Based_Image_Dataset/`
+Download the dataset from Mendeley Data (DOI [10.17632/hkbgh5s3b7.1](https://doi.org/10.17632/hkbgh5s3b7.1)) and unzip so these folders sit side by side:
 
-   The class label is taken from the parent folder name.
+```
+Soyabean_Leaf_Image_Dataset/
+Soyabean_UAV-Based_Image_Dataset/
+```
 
-2. Upload `soya_pipeline.zip` and `soya_run.ipynb`, open the notebook, and run top to bottom.
+The class label is the **name of each image's parent folder**.
 
-The notebook records the clean experimental run used for the reported results.
-
-### Command line
+### 2. Install and point to the data
 
 ```bash
 pip install -r requirements.txt
 export SOYA_ROOT=/path/to/folder/containing/both/datasets
 ```
 
-#### Leaf
-
-The main leaf experiment uses 5-fold cross-validation with EfficientNet-B0 at 320 px.
+### 3. Run the leaf pipeline
 
 ```bash
 python 01_build_manifest.py   --dataset leaf --img-size 320
 python 02_cache_images.py     --dataset leaf --img-size 320
 python 03_eda.py              --dataset leaf --img-size 320
 python 04_extract_features.py --dataset leaf --img-size 320
-python 05_audit_split.py      --dataset leaf --img-size 320
-
-for f in 0 1 2 3 4; do
-  python 06_train_classical.py --dataset leaf --img-size 320 --fold $f
-  python 07_finetune_cnn.py    --dataset leaf --img-size 320 --fold $f \
-      --model efficientnet_b0 --epochs 30 --patience 8
-  python 08_evaluate.py        --dataset leaf --img-size 320 --fold $f --tta
-done
-
-python 09_cv_summary.py \
-    --dataset leaf \
-    --img-size 320 \
-    --model-tag cnn_efficientnet_b0_320_tta
+python 05_train_classical.py  --dataset leaf --img-size 320
+python 06_finetune_cnn.py     --dataset leaf --img-size 320 \
+    --model efficientnet_b0 --epochs 30 --patience 8
+python 07_evaluate_test.py    --dataset leaf --img-size 320 --tta   # ONE look at the test set
 ```
 
-The final ensemble experiments extend this by adding the CutMix EfficientNet-B0 variant and ConvNeXt-Tiny:
+`run_all.sh` chains the same steps with default settings (`DS=leaf` or `DS=uav`, 224 px).
+
+### 4. Predict on new images
 
 ```bash
-for f in 0 1 2 3 4; do
-  python 07_finetune_cnn.py \
-      --dataset leaf --img-size 320 --fold $f \
-      --model efficientnet_b0 --epochs 30 --patience 8 --cutmix 1.0
+# single image or folder, top-3 classes
+python 08_predict.py --dataset leaf --input leaf.jpg
 
-  python 07_finetune_cnn.py \
-      --dataset leaf --img-size 320 --fold $f \
-      --model convnext_tiny --epochs 30 --patience 8 \
-      --lr-backbone 1e-4
-
-  python 08_evaluate.py \
-      --dataset leaf --img-size 320 --fold $f \
-      --which cnn --cnn all --tta
-done
-
-python 09_cv_summary.py \
-    --dataset leaf \
-    --img-size 320 \
-    --model-tag cnn_ensemble3
+# large UAV frame cut into an N×N grid; prints the share of tiles per class
+python 08_predict.py --dataset uav --input frame.jpg --tile-grid 4 --out preds.csv
 ```
 
-#### UAV
+The checkpoint defaults to `artifacts/<dataset>/models/cnn_best.pt`; override with `--ckpt`. Image size and normalisation come from the checkpoint.
 
-UAV evaluation uses grouped 3-fold cross-validation and should be read together with the split audit.
-
-```bash
-python 01_build_manifest.py --dataset uav --img-size 224 --folds 3
-python 02_cache_images.py   --dataset uav --img-size 224
-python 04_extract_features.py --dataset uav --img-size 224
-
-for f in 0 1 2; do
-  python 05_audit_split.py --dataset uav --img-size 224 --fold $f
-done
-
-for f in 0 1 2; do
-  python 06_train_classical.py \
-      --dataset uav --img-size 224 --fold $f
-
-  python 07_finetune_cnn.py \
-      --dataset uav --img-size 224 --fold $f \
-      --epochs 20 --warmup-epochs 3 \
-      --lr-backbone 1e-4 --patience 6
-
-  python 08_evaluate.py \
-      --dataset uav --img-size 224 --fold $f --tta
-done
-
-python 09_cv_summary.py \
-    --dataset uav --img-size 224 --model-tag cnn
-
-python 09_cv_summary.py \
-    --dataset uav --img-size 224 --model-tag classical
-```
-
-### Additional leaf experiments
-
-The notebook also contains:
-
-- DINOv2-S/14 frozen embeddings
-- SVC with inner cross-validation for `C`
-- DINOv2/CNN probability blending
-- EfficientNet-B0 + CutMix ensemble
-- EfficientNet-B0 + CutMix + ConvNeXt-Tiny ensemble
-
-The DINOv2 experiment produced:
-
-```
-DINOv2 only       pooled macro-F1 = 0.6837
-CNN only          pooled macro-F1 = 0.7325
-50/50 CNN + DINO  pooled macro-F1 = 0.7488
-```
-
-The DINOv2 blend was subsequently superseded by the 3-CNN ensemble.
-
-### Smoke test without the real data
+### 5. Smoke test without the real data
 
 ```bash
 python make_dummy_data.py --out ./dummy_data
 export SOYA_ROOT=./dummy_data
-
-DS=leaf K=3 SIZE=64 bash run_all.sh
+DS=leaf bash run_all.sh
 ```
 
-**Run time (Colab T4, approximate):** manifest + cache + features 5–8 min per dataset; EfficientNet-B0 at 320 px about 4–5 min per fold; ConvNeXt-Tiny about 6–7 min per fold; UAV cross-validation about 15–25 min.
+The dummy set includes exact and flipped duplicates so the de-duplication guards can be seen working. Steps that need PyTorch (`04` deep features, `06`, `07 --which cnn`, `08`) run on CPU, slowly.
 
 ---
 
-## Using the trained models
+## What each script does
 
-```bash
-# One image or a folder; several checkpoints can be probability-averaged.
-python 10_predict.py --dataset leaf --input leaf.jpg \
-  --ckpt artifacts/leaf/models/fold*/cnn_efficientnet_b0_320.pt \
-         artifacts/leaf/models/fold*/cnn_convnext_tiny_320.pt
+| Script | Key options | Output |
+|---|---|---|
+| `01_build_manifest.py` | `--test-size 0.20`, `--val-size 0.10`, `--hash-thr 6`, `--no-dihedral` | `manifest.csv`, `classes.json`, `dropped.csv` |
+| `02_cache_images.py` | `--force` | `cache/{train,val,test}_x<size>.npy`, `cache/stats.json` (train-only mean/std) |
+| `03_eda.py` | – | `eda/*.png`, `eda/eda_summary.json`, `eda/color_stats_by_class.csv` |
+| `04_extract_features.py` | `--backbone`, `--batch-size`, `--no-pretrained`, `--skip-hand`, `--skip-deep` | `features/{split}_hand.npy`, `features/{split}_deep_<backbone>.npy` |
+| `05_train_classical.py` | `--feature-sets hand deep both`, `--models logreg svc rf hgb`, `--cv N`, `--pca N` | `models/classical_best.joblib`, `reports/classical_results.csv` |
+| `06_finetune_cnn.py` | `--model`, `--epochs 15`, `--warmup-epochs 2`, `--lr-head 2e-3`, `--lr-backbone 3e-4`, `--patience 4`, `--label-smoothing 0.1`, `--no-class-weights` | `models/cnn_best.pt`, `reports/cnn_history.csv`, `reports/cnn_curves.png` |
+| `07_evaluate_test.py` | `--split {test,val}`, `--which {cnn,classical,both}`, `--tta`, `--bootstrap 500` | `reports/<tag>_{metrics.json,report.txt,confusion.png,misclassified.csv}`, `reports/test_eval_log.txt` |
+| `08_predict.py` | `--input`, `--ckpt`, `--topk 3`, `--tile-grid N`, `--out` | console output, optional CSV |
 
-# Large UAV frame cut into an NxN grid; reports the share of tiles per class.
-python 10_predict.py --dataset uav --input frame.jpg \
-  --tile-grid 4 \
-  --ckpt artifacts/uav/models/fold0/cnn_*.pt
-```
+Supported backbones: `mobilenet_v3_large`, `efficientnet_b0`, `resnet18`, `resnet50` (ImageNet-pretrained torchvision weights).
 
-Do not score all five fold models together on the same leaf dataset and call that an unbiased evaluation. Each image was used for training by four of the five fold models. Averaging fold checkpoints is appropriate for new images, not for estimating performance on the same CV data.
+### Leakage safeguards in the code
 
----
-
-## Limitations and Future Work
-
-This project was developed under limited local GPU/compute resources, so the experiments focused on models and evaluation protocols that were practical to run within the available hardware budget. As a result, the current study does not include large-scale hyperparameter sweeps, extensive multi-GPU training, or very large foundation models.
-
-The main limitations of the current work are:
-
-- The leaf dataset is relatively limited in size and class balance, particularly for difficult classes such as Frog-eye and Septoria.
-- The best leaf result was obtained after comparing multiple model variants on the same folds, so the final number should be treated as a strong experimental result rather than a fully independently selected benchmark.
-- UAV evaluation is based on a limited number of independent flight/video groups, so broader field- and season-level generalisation requires further validation.
-- UAV class labels are strongly associated with recording dates/sessions, making acquisition confounding a major limitation even after video-aware grouping.
-- UAV images were processed at a constrained resolution for computational feasibility, which may limit recognition of small or subtle disease symptoms.
-- The current evaluation primarily uses the available dataset; external-dataset validation would provide a stronger test of cross-domain generalisation.
-- The training-free 1-NN UAV result being close to the CNN result is evidence that visual/session similarity explains a substantial portion of the observed performance.
-- The current project is an image-recognition pipeline, not a validated agronomic recommendation system.
-
-Future work will focus on:
-
-- External validation on additional soybean disease datasets.
-- Field-, flight-, and date-level cross-validation for stronger generalization estimates.
-- Higher-resolution and multi-scale UAV inference using tiled crops.
-- Targeted improvement of difficult disease classes through hard-example mining and class-balanced training.
-- Grad-CAM or related interpretability methods to verify that predictions rely on disease-relevant visual regions.
-- Larger hyperparameter/model searches when additional compute resources are available.
-- More UAV videos for each class recorded across the same fields and dates, which is the most important step for separating disease recognition from acquisition/session effects.
+- Corrupt files are dropped; exact duplicates (MD5) are dropped; identical bytes under different labels are all dropped.
+- Near-duplicates are found with a perceptual hash (pHash on a 64 px thumbnail), compared across the 8 flip/rotation variants, and merged into clusters with union-find (default Hamming threshold 6 of 64 bits).
+- The split is `StratifiedGroupKFold` over those clusters, decided once on file metadata only. Hard assertions stop the run if a cluster or an MD5 crosses splits.
+- Scalers and PCA live inside sklearn pipelines fitted on train only; class weights come from train labels only.
+- Model selection (classical and CNN) uses **val**. `05` and `06` never load the test split.
+- `07` logs every test evaluation in `reports/test_eval_log.txt` and prints a warning on repeat use.
+- Confidence intervals resample **clusters**, not single images.
 
 ---
 
-## Reproducibility notes
+## Metrics reported by `07_evaluate_test.py`
 
-- Seeds are fixed (`--seed 42`) and folds are stored in `manifest.csv`, but GPU training is not bit-exact (`cudnn.benchmark`, mixed precision), so small run-to-run variation is expected.
-- The notebook's clean run was performed on a Google Colab Tesla T4 GPU.
-- Every test-set evaluation is logged so repeated test looks can be identified.
-- Pretrained torchvision weights are downloaded automatically.
-- DINOv2 weights were downloaded separately during the notebook-only DINOv2 experiment.
-- The notebook saves the final artifacts to Drive while excluding the large image cache, which can be rebuilt.
+Accuracy, balanced accuracy, macro and weighted F1, macro precision/recall, MCC, ROC-AUC (one-vs-rest), log-loss, expected calibration error (15 bins), per-image latency, a cluster-bootstrap 95 % CI on macro-F1, per-class report, count and row-normalised confusion matrices, and a CSV of misclassified files sorted by confidence.
 
-## Data and Credits
+`--tta` averages logits over the original, horizontal flip and vertical flip.
 
-**Dataset:** *MH-SoyaHealthVision: An Indian UAV and Leaf Image Dataset for Integrated Crop Health Assessment* by Sayali Shinde and Dr. Vahida Attar, Mendeley Data, Version 1, DOI: [10.17632/hkbgh5s3b7.1](https://doi.org/10.17632/hkbgh5s3b7.1).
+---
 
-The dataset is made available under the Creative Commons Attribution 4.0 International (CC BY 4.0) licence. Please refer to the original dataset record for the complete licence terms and attribution requirements.
+## Results recorded in the notebook
+
+These numbers are in the outputs saved in `soya_run.ipynb`. They come from the extended pipeline (grouped folds, ensembles), **not** from the scripts committed here, so the committed code will not reproduce them as-is.
+
+**Leaf: 5-fold stratified CV, pooled out-of-fold, n = 2,756** (95 % CI from cluster bootstrap)
+
+| Model | Macro-F1 | 95 % CI | Accuracy |
+|---|---|---|---|
+| Classical (hand + frozen MobileNetV3, best config per fold) | 0.690 | 0.671 – 0.709 | 0.724 |
+| DINOv2-S/14 frozen + SVC | 0.684 | 0.665 – 0.702 | – |
+| EfficientNet-B0, 320 px, flip TTA | 0.733 | 0.716 – 0.749 | 0.747 |
+| B0 + B0/CutMix (ensemble of 2) | 0.742 | 0.726 – 0.760 | 0.756 |
+| B0 + B0/CutMix + ConvNeXt-Tiny (ensemble of 3) | **0.761** | 0.744 – 0.778 | 0.775 |
+
+The best model was chosen after comparing variants on the same folds, so treat 0.761 as an experimental benchmark, not an independently selected estimate. The weakest classes are Frog-eye (F1 0.564) and Septoria brown spot (0.623); Healthy is 0.998.
+
+**UAV: grouped 3-fold CV by video, n = 2,831**
+
+| Evaluation | Macro-F1 |
+|---|---|
+| CNN (MobileNetV3-Large, 224 px) | 0.876 (CI 0.737 – 0.959) |
+| Classical features + HistGradientBoosting | 0.909 (CI 0.834 – 0.957) |
+| Training-free 1-NN on frozen features | 0.873 (mean of folds: 0.867 / 0.921 / 0.831) |
+| Mean-RGB-only probe | 0.647 – 0.718 (chance 0.25) |
+
+A training-free 1-NN lookup matches the trained CNN, and leave-one-date-out recall is unstable (three largest date blocks 0.67 – 0.76; smaller blocks 0.00 – 1.00). **The UAV scores do not show generalisation to new fields, dates or seasons.** UAV classes are strongly tied to recording dates; only 1 of 8 parseable dates is shared by two classes.
+
+---
+
+## What is not in this repo
+
+The notebook and the results above rely on features that the committed scripts do not have:
+
+- `05_audit_split.py` (source-group overlap, nearest-train similarity, 1-NN probe, mean-RGB probe, leave-one-date-out)
+- `09_cv_summary.py` and `metrics.py` (pooled out-of-fold metrics, cluster-bootstrap helper)
+- `10_predict.py` with multi-checkpoint ensembling
+- `--fold` / `--folds` options, fixed CV folds in the manifest, and the per-fold artifact folders
+- video/source-group parsing from UAV file names (here, clusters come from pHash only)
+- `--cutmix` and the `convnext_tiny` backbone, and ensembling of several checkpoints
+- script names: the notebook calls `06_train_classical.py`, `07_finetune_cnn.py`, `08_evaluate.py`; here these are `05_train_classical.py`, `06_finetune_cnn.py`, `07_evaluate_test.py`
+
+Also, the notebook downloads its code from a private Drive zip (`soya_pipeline.zip`), not from this repository.
+
+---
+
+## Known limitations of the committed code
+
+- **UAV leakage is not prevented.** Frames from one video are grouped only if their pHash is close, which the project's own earlier analysis found leaves most evaluation frames sharing a video with training. Do not report a UAV score from a single split of this code.
+- **One checkpoint slot.** `06` always writes `models/cnn_best.pt`, so a second training run overwrites the first. `07` and `08` read only that file; there is no ensembling.
+- **Stale caches.** `02` skips existing files and `common.load_xy` only checks the row count. If you rebuild the manifest (new seed or threshold) without `02_cache_images.py --force`, rows can be silently misaligned. Features have the same problem (file names do not include the image size).
+- **Aspect ratio.** All images, including 16:9 UAV frames, are resized to a square.
+- **Augmentation.** `06` applies one random 90° rotation per batch, not per image.
+- **Internal splits.** The HistGradientBoosting early-stopping split and the SVC's Platt-scaling folds are random, not cluster-aware (inside the training set only; held-out scores are unaffected).
+- **Trusted checkpoints only.** `load_checkpoint` uses `torch.load(..., weights_only=False)`.
+- **No tests**, unpinned `requirements.txt`, and GPU training is not bit-exact (`cudnn.benchmark`, mixed precision).
+- This is an image-recognition pipeline, not a validated agronomic or treatment advisory system.
+
+---
+
+## Data and credits
+
+**Dataset:** *MH-SoyaHealthVision: An Indian UAV and Leaf Image Dataset for Integrated Crop Health Assessment* by Sayali Shinde and Dr. Vahida Attar, Mendeley Data, Version 1, DOI [10.17632/hkbgh5s3b7.1](https://doi.org/10.17632/hkbgh5s3b7.1), licensed CC BY 4.0. Refer to the original record for full terms and attribution requirements.
 
 ## Licence
 
-The code in this repository is released under the **MIT License**.
-
-The dataset used by this project is not covered by the MIT License and remains subject to its original CC BY 4.0 licence and attribution requirements.
+The code in this repository is released under the MIT License. The dataset is not covered by it and remains under its original CC BY 4.0 licence.
