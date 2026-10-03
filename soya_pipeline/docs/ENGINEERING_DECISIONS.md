@@ -1,8 +1,8 @@
-# Engineering Documentation: what each file does and why
+# Engineering Documentation: What Each File Does and Why
 
 This document explains every script, the artifacts it produces, and the engineering decisions behind it.
-The recurring theme: **this dataset makes it very easy to report a score that means nothing**, so the
-pipeline is built to prevent that and to measure how far the numbers can be trusted.
+
+The recurring theme: this dataset makes it very easy to report a score that means nothing, so the pipeline is built to prevent that and to measure how far the numbers can be trusted.
 
 ---
 
@@ -10,13 +10,13 @@ pipeline is built to prevent that and to measure how far the numbers can be trus
 
 | Fact (measured) | Consequence |
 |---|---|
-| Leaf: 2,782 files, 26 dropped (duplicates / corrupt / conflicting labels, see `dropped.csv`) -> 2,756 | Cleaning is part of the pipeline, not manual |
-| Leaf: no near-duplicates; nearest-train similarity median 0.87; 1-NN macro-F1 0.59 | A random stratified split is safe; CV gives a tight estimate |
-| Leaf: 5x class imbalance (845 rust vs 168 Frog-eye) | Macro-F1, class-weighted loss |
-| UAV: 2,842 files, 11 dropped -> 2,831 frames from only **9 / 9 / 13** videos for rust / mosaic / semilooper, 49 blocks for healthy | Frames within a video are near-identical: group by video |
-| UAV: first random split gave nearest-train similarity 0.98 and 1-NN F1 0.997 | The first 0.99 results were leakage |
-| UAV: only 1 of 8 parseable capture dates is shared by two classes | Class is partly confounded with recording session |
-| UAV healthy: numbered stills (`image_012.jpg`), no timestamp | Different source than the diseased classes |
+| Leaf: 2,782 files, 26 dropped (duplicates / corrupt / conflicting labels) → 2,756 | Cleaning is part of the pipeline, not manual |
+| Leaf: no meaningful near-duplicates; nearest-train similarity median ≈ 0.87; 1-NN macro-F1 ≈ 0.59 | A random stratified split is substantially safer than the UAV case; CV gives a tighter estimate |
+| Leaf: 5× class imbalance (845 Rust vs 168 Frog-eye) | Macro-F1 and class-weighted training are important |
+| UAV: 2,842 files, 11 dropped → 2,831 frames from only 9 / 9 / 13 videos for Rust / Mosaic / Semilooper, plus 49 healthy source blocks | Frames within a video are highly correlated: group by video/source |
+| UAV: first random split gave nearest-train similarity ≈ 0.98 and 1-NN F1 ≈ 0.997 | The first ≈0.99 result was leakage and was discarded |
+| UAV: only 1 of 8 parseable capture dates is shared by two classes | Class is partly confounded with recording session/date |
+| UAV healthy images use numbered stills such as `image_012.jpg` and do not contain the same timestamp structure as the diseased videos | Healthy imagery has a different acquisition/source structure |
 
 ---
 
@@ -25,111 +25,344 @@ pipeline is built to prevent that and to measure how far the numbers can be trus
 ```
 raw images --01--> manifest.csv (clean, grouped, split, folds)
                        |
-                       +--02--> cache/all_x<size>.npy  (one uint8 array, rows = manifest order)
-                                   |
-                                   +--04--> features/all_hand.npy, all_deep_<backbone>.npy
-                                   |            |
-                                   |            +--05 audit, 06 classical models
-                                   +--07 fine-tune CNN (reads train/val rows only)
-                                                |
-                                   08 evaluate (val or test) --> *_pred.csv --> 09 CV summary
-                                                |
-                                   10 predict on new images
+                       +--02--> cache/all_x<size>.npy
+                       |           (one uint8 array, rows = manifest order)
+                       |
+                       +--04--> features/all_hand.npy
+                       |           all_deep_<backbone>.npy
+                       |                |
+                       |                +--05 audit
+                       |                +--06 classical models
+                       |
+                       +--07 fine-tune CNN
+                                  |
+                                  +--08 evaluate
+                                         |
+                                         +-- *_pred.csv
+                                               |
+                                               +--09 CV summary
+                                                        |
+                                                        +--10 predict
 ```
 
-Core idea: **the manifest is the single source of truth.** It stores `group`, `cluster`, `split` and `fold` once.
-Every later script only *selects rows* from the cache and feature arrays; nothing ever re-splits.
+**Core idea:** the manifest is the single source of truth. It stores `group`, `cluster`, `split` and `fold` once.
+
+Every later script selects rows from the cache/features according to that manifest rather than creating a new independent split.
 
 ### Artifact layout
 
 ```
 artifacts/<dataset>/
-  manifest.csv   classes.json   dropped.csv
-  cache/all_x<size>.npy
-  features/all_hand.npy  all_deep_<backbone>.npy  hand_feature_names.json
-  eda/           tables and figures
-  models/<main|fold0..>/   cnn_<model>_<size>[_cutmix].pt + .json sidecar, classical_best.joblib
-  reports/<main|fold0..>/  *_metrics.json  *_report.txt  *_pred.csv  *_confusion.png
-                           *_misclassified.csv  cnn_*_history.csv  cnn_*_curves.png
-                           classical_results.csv  test_eval_log.txt
-  reports/cv/    pooled cross-validation summaries
+  manifest.csv
+  classes.json
+  dropped.csv
+
+  cache/
+    all_x<size>.npy
+
+  features/
+    all_hand.npy
+    all_deep_<backbone>.npy
+    hand_feature_names.json
+
+  eda/
+    tables and figures
+
+  models/
+    main/
+    fold0/
+    fold1/
+    ...
+
+  reports/
+    main/
+    fold0/
+    fold1/
+    ...
+
+  reports/cv/
+    pooled cross-validation summaries
 ```
 
-`manifest.csv` columns: `relpath, label, label_id, width, height, bytes, md5, group, date, cluster, split, fold`.
+`manifest.csv` contains the core metadata used downstream, including:
+
+- `relpath`
+- `label`
+- `label_id`
+- `width`
+- `height`
+- `bytes`
+- `md5`
+- `group`
+- `date`
+- `cluster`
+- `split`
+- `fold`
 
 ---
 
 ## 3. File-by-file reference
 
 ### `common.py`: shared plumbing
-* **`common_args`**: one argument parser shared by all scripts (`--dataset`, `--img-size`, `--fold`, `--seed`, `--backbone`, ...) so options mean the same everywhere.
-* **`Paths`**: computes every artifact path from `(dataset, size, fold)`. Models and reports are stored per split (`main`, `fold0`, ...), so runs never overwrite each other.
-* **`load_manifest` / `_fold_split`**: with `--fold k`, rows of fold *k* become **test**; from the remaining rows, about 1/6 of each class's clusters become **validation** (at least one per class, seeded), the rest **train**.
-* **`load_xy`, `load_features`, `load_resized`**: select rows from the one big cache; `load_resized` uses JPEG draft mode (about 5x faster decoding of the 3840x2160 UAV frames).
 
-### `metrics.py`
-* `softmax`, `ece_score` (expected calibration error, 15 bins), and **`cluster_bootstrap_f1`**: 95 % CI of macro-F1 obtained by resampling *whole clusters*, not single images (images in a cluster are not independent).
+- Shared command-line argument parsing for dataset, image size, fold, seed and model configuration.
+- `Paths` computes artifact paths from dataset/image-size/fold so different experiments do not overwrite each other.
+- Shared cache and feature loaders keep row ordering tied to `manifest.csv`.
+- Fold handling ensures that downstream scripts select the same rows defined by the manifest.
+
+### `metrics.py`: evaluation utilities
+
+- `softmax`
+- expected calibration error
+- cluster-bootstrap confidence intervals
+- macro-F1 confidence intervals obtained by resampling clusters rather than individual images
+
+Cluster-level bootstrap is used because images belonging to the same source/video/cluster are not independent observations.
 
 ### `features.py`
-* 90 hand-crafted features per image: colour statistics, vegetation-index and texture descriptors (names stored in `hand_feature_names.json`). Fast, CPU-only, interpretable baseline.
+
+Approximately 90 hand-crafted features per image, including:
+
+- colour statistics
+- RGB / HSV / LAB descriptors
+- vegetation indices
+- colour fractions
+- texture descriptors
+- GLCM features
+- LBP
+- Laplacian variance
+- edge-density measurements
+
+The resulting representation provides a fast, CPU-friendly and interpretable baseline.
 
 ### `models.py`
-* torchvision backbones with ImageNet weights: MobileNetV3-Large, EfficientNet-B0/B2, ConvNeXt-Tiny, ResNet-18/50.
-* `build_model` swaps the last layer; `build_embedder` removes it to get frozen embeddings; `split_backbone_head` separates parameters for different learning rates.
-* `forward_batches`: batched GPU inference with optional flip TTA and mixed precision; checkpoint save/load stores architecture, classes, image size and normalisation together.
+
+The model utilities support ImageNet-pretrained torchvision architectures used in the experiments, including:
+
+- MobileNetV3-Large
+- EfficientNet-B0
+- EfficientNet-B2
+- ConvNeXt-Tiny
+- ResNet-18
+- ResNet-50
+
+The module provides:
+
+- classification model construction
+- frozen embedding extraction
+- backbone/head separation
+- batched inference
+- optional test-time augmentation
+- mixed-precision inference
+- checkpoint saving/loading
 
 ### `01_build_manifest.py`: validate, de-duplicate, group, split
-1. Scans images; unreadable files are dropped.
-2. **Exact duplicates** (MD5): keep the first. **Same bytes under different labels**: drop all (label noise).
-3. **Near-duplicates**: 64-bit DCT perceptual hash of a 64 px thumbnail, computed for all **8 flips/rotations** and compared with the best match; pairs within `--hash-thr` (default 6 bits) are linked.
-4. **Source groups (UAV)** parsed from file names: `DJI_<timestamp>_<id>_D_<frame>` and `DJI_<id>_<frame>` -> the video; `image_<n>` -> bursts of consecutive numbers (`--burst`, default blocks of 10).
-5. A **union-find** merges the pHash links and the source groups into final `cluster` ids.
-6. `StratifiedGroupKFold` makes a 70/10/20 split (`split`) and K folds (`fold`; 5 for leaf, 3 for UAV), all on metadata only.
-7. **Hard assertions**: no cluster, group or MD5 spans two splits or two folds. Warnings if a cluster exceeds 40 % of a class, if a class has fewer groups than folds, or if a class has fewer than 15 independent sources.
-8. `--max-per-group N` can thin redundant frames. Re-running clears stale cache/feature files, because row order changes.
+
+1. Scans the dataset and drops unreadable/corrupt files.
+2. Detects exact duplicates using MD5.
+3. Drops identical bytes appearing under conflicting labels.
+4. Detects perceptual near-duplicates using DCT-based perceptual hashing.
+5. Applies hashing across transformed versions including flips/rotations.
+6. Parses UAV source/video information from file names.
+7. Groups consecutive frames from the same source/video.
+8. Merges perceptual-hash links and source groups into final clusters.
+9. Creates the main train/validation/test split.
+10. Creates fixed cross-validation folds.
+11. Uses group-aware splitting so correlated source groups do not cross boundaries.
+12. Performs hard leakage assertions.
+
+The manifest is generated before feature/model training so that no later experiment silently creates a different split.
 
 ### `02_cache_images.py`
-Decodes and resizes every image once (EXIF-rotated, bilinear, squashed to a square) into a single uint8 array in manifest order.
+
+Decodes and resizes every image once into a single uint8 array in manifest order.
+
+The clean notebook run used:
+
+- 320 × 320 for leaf experiments
+- 224 × 224 for UAV experiments
+
+This avoids repeatedly decoding the original images during each fold/model run.
 
 ### `03_eda.py`
-Prints the tables that decided the design (images per class and split, independent sources per class, capture dates per class, imbalance) and saves plots; the sample grid shows **one frame per source group** so one video cannot fill it.
+
+Produces the dataset diagnostics that drove the experimental design:
+
+- images per class
+- images per split
+- class imbalance
+- independent source groups
+- capture dates
+- representative samples
+- dataset-level tables and figures
+
+For UAV data, source-aware inspection is particularly important because one video can otherwise dominate a random sample grid.
 
 ### `04_extract_features.py`
-Computes hand-crafted features and frozen-backbone embeddings for **all rows at once**. Nothing is fitted here, so computing it for all rows cannot leak; scaling and PCA happen later inside sklearn pipelines fitted on train only.
+
+Computes:
+
+- handcrafted features
+- frozen CNN embeddings
+
+The notebook produced:
+
+```
+Leaf handcrafted features: (2756, 90)
+```
+
+The frozen embeddings are generated without fitting a classifier, so later scaling/model fitting can still be restricted to training data.
 
 ### `05_audit_split.py`: the trust check
-For the active split, reports:
-* **(a)** share of val/test images whose source group is in train (must be 0 %);
-* **(b)** cosine similarity of each val/test image to its nearest train image, and the macro-F1 of a **1-NN lookup** (a model that only memorises);
-* **(c)** macro-F1 using only the 3 mean-RGB values;
-* **(d)** leave-one-date-out recall for classes recorded on 2+ dates.
-Reading it: if a trivial lookup matches your trained model, the task is solved by scene recognition, not disease recognition.
+
+For the active split/fold, the audit reports:
+
+- **(a)** percentage of validation/test images whose source group appears in training
+- **(b)** nearest-train feature similarity and training-free 1-NN macro-F1
+- **(c)** macro-F1 from a mean-RGB-only probe
+- **(d)** leave-one-date-out recall where enough dates exist
+
+The interpretation is deliberate:
+
+> If a trivial nearest-neighbour lookup performs similarly to the trained model, the benchmark may be dominated by visual/source similarity rather than disease recognition.
+
+For UAV, this audit exposed the original random-split problem and remained part of the final evaluation rather than being hidden after the score dropped.
 
 ### `06_train_classical.py`
-Pipelines of `StandardScaler` (optional PCA) plus Logistic Regression, RBF-SVC, Random Forest or HistGradientBoosting (class-balanced), on hand / deep / both feature sets. Selected by **validation** macro-F1; test is never loaded.
 
-### `07_finetune_cnn.py`: transfer learning, tuned for a free Colab GPU
-* The whole train set sits on the GPU as uint8; **augmentation runs on the GPU** (flips, 90-degree rotations, +/-20 % brightness/contrast, random zoom-in crop 0.75-1.0). No CPU data-loader bottleneck.
-* Mixed precision, channels-last memory format, AdamW.
-* **Two-stage schedule:** backbone frozen for `--warmup-epochs` (BatchNorm stays in eval mode), then unfrozen.
-* **LR schedule:** head ramps up over half an epoch; backbone LR ramps linearly over one epoch after unfreezing; both decay with cosine.
-* Class-weighted cross-entropy, label smoothing 0.1, optional **CutMix**.
-* Early stopping and best-checkpoint on **validation macro-F1** (ties broken by val loss).
-* Checkpoint is named `cnn_<model>_<size>[_cutmix]` with a JSON sidecar holding its validation score.
+Trains classical models on:
+
+- handcrafted features
+- frozen deep features
+- combined feature representations
+
+Models explored include:
+
+- Logistic Regression
+- RBF-SVC
+- Random Forest
+- HistGradientBoosting
+
+Scaling/PCA, where used, are fitted within the training portion.
+
+For the leaf CV experiment, the selected classical configuration produced approximately:
+
+```
+pooled macro-F1 = 0.690
+pooled accuracy = 0.724
+```
+
+For UAV grouped CV, the classical HistGradientBoosting result reached:
+
+```
+pooled macro-F1 = 0.909
+pooled accuracy = 0.902
+```
+
+The UAV number is intentionally reported together with the audit because it is strongly affected by the dataset's acquisition structure.
+
+### `07_finetune_cnn.py`: transfer learning
+
+The CNN experiments were designed for a Colab T4 GPU and limited compute.
+
+The training pipeline uses:
+
+- ImageNet-pretrained weights
+- GPU-resident image data
+- GPU-side augmentation
+- mixed precision
+- AdamW
+- class-weighted loss
+- label smoothing
+- optional CutMix
+- frozen-backbone warm-up
+- backbone/head learning-rate separation
+- early stopping
+- validation macro-F1 for checkpoint selection
+
+Leaf experiments used 320 px.
+
+UAV experiments used 224 px to keep grouped 3-fold experimentation computationally practical.
+
+The main leaf CNN progression was:
+
+```
+EfficientNet-B0 + flip TTA
+        ↓
+CutMix EfficientNet-B0 ensemble
+        ↓
+EfficientNet-B0 + CutMix + ConvNeXt-Tiny ensemble
+```
 
 ### `08_evaluate.py`
-Accuracy, balanced accuracy, macro/weighted F1, macro precision/recall, MCC, ROC-AUC (one-vs-rest), log-loss, ECE, latency per image, cluster-bootstrap CI, per-class report, confusion matrices, misclassified list, and per-image probabilities.
-* `--cnn best` picks the best-val checkpoint at that image size; `--cnn all` **averages probabilities** of all of them (ensemble); `--tta` averages original, horizontal-flip and vertical-flip predictions.
-* Every **test** evaluation is logged with a timestamp, and a warning is printed from the second look onward.
+
+Reports:
+
+- accuracy
+- balanced accuracy
+- macro/weighted F1
+- macro precision/recall
+- MCC
+- ROC-AUC where applicable
+- log loss
+- ECE
+- latency
+- confidence intervals
+- per-class reports
+- confusion matrices
+- misclassified examples
+- per-image probabilities
+
+It also supports:
+
+- test-time augmentation
+- selecting the best validation checkpoint
+- probability averaging across ensemble members
+
+The notebook used flip TTA and probability averaging for the CNN ensemble experiments.
 
 ### `09_cv_summary.py`
-Collects the per-fold prediction files and reports mean +/- sd of fold macro-F1, **pooled out-of-fold macro-F1 with cluster-bootstrap CI**, per-class precision/recall, and the pooled confusion matrix.
+
+Collects the per-fold prediction files and reports:
+
+- per-fold macro-F1
+- mean and standard deviation across folds
+- pooled out-of-fold macro-F1
+- cluster-bootstrap confidence interval
+- pooled accuracy
+- per-class precision/recall/F1
+- pooled confusion matrix
+
+This is the source of the final leaf headline result:
+
+```
+3-CNN ensemble
+
+Pooled macro-F1: 0.7606
+95% CI:           0.7439 - 0.7777
+Accuracy:         0.7747
+```
 
 ### `10_predict.py`
-Predicts a file or folder. Several `--ckpt` files give a probability-averaged ensemble. `--tile-grid N` cuts a large UAV frame into N x N tiles and returns the share of each predicted class.
+
+Provides inference on new images.
+
+The notebook/documented workflow supports:
+
+- single-image inference
+- folder inference
+- probability-averaged checkpoints
+- UAV frame tiling using an `N × N` grid
+
+Fold checkpoints should be averaged only for new images.
+
+They should not be jointly scored on the same CV dataset because each image participated in training for most of the fold models.
 
 ### `run_all.sh`, `make_dummy_data.py`, `requirements.txt`
-`run_all.sh` chains the steps (single split, or CV with `K=`). `make_dummy_data.py` builds a small synthetic dataset with UAV-style file names so the whole pipeline can be smoke-tested in minutes.
+
+- `run_all.sh` provides an end-to-end driver for the pipeline.
+- `make_dummy_data.py` generates a small synthetic dataset with leaf/UAV-style file naming so that the pipeline can be smoke-tested without downloading the real dataset.
+- `requirements.txt` contains the Python dependencies used by the pipeline.
 
 ---
 
@@ -137,34 +370,34 @@ Predicts a file or folder. Several `--ckpt` files give a probability-averaged en
 
 | # | Decision | Why |
 |---|---|---|
-| 1 | Split once, in the manifest, on metadata only | Prevents any later step from re-splitting differently or peeking at labels/pixels |
-| 2 | Merge perceptual-hash clusters with parsed video ids | pHash missed near-identical frames of one video; filenames carry the true source |
-| 3 | Hash all 8 flips/rotations | Duplicates are often rotated or mirrored copies |
-| 4 | Drop files with identical bytes but different labels | Cannot both be right; keeping them poisons training and evaluation |
-| 5 | Stratified **group** K-fold, folds fixed in the manifest | Class balance preserved; groups never leak; all scripts agree on the folds |
-| 6 | Cross-validation for reporting | A single 20 % test set of 552 images has CI +/- 0.04; 5-fold pooled over 2,756 images has +/- 0.017 |
-| 7 | Validation carved from the training groups per fold, test fold untouched | Model selection never sees test data |
-| 8 | Macro-F1 as primary metric | 5x class imbalance; accuracy would reward ignoring small classes |
-| 9 | Bootstrap CI over clusters, not images | Images in a cluster are not independent; image-level CIs are too narrow |
-| 10 | One cache + one feature file, row-indexed | Any split/fold is just row selection: no per-split recomputation, no row-order bugs |
-| 11 | Features for all rows, scalers inside pipelines | Unfitted transforms cannot leak; fitted ones are refit per fold on train only |
-| 12 | GPU-resident data and GPU-side augmentation | Colab provides about 2 CPU cores; CPU data loading was the bottleneck |
-| 13 | No hue jitter in augmentation | Colour is a disease cue (yellowing in rust/mosaic) |
-| 14 | Frozen warm-up and separate backbone/head learning rates | Protects pretrained features while the new head is random |
-| 15 | New LR schedule with backbone ramp | The earlier one-cycle schedule peaked exactly when the backbone unfroze and UAV validation F1 collapsed at that epoch |
-| 16 | Class-weighted loss and label smoothing | Imbalance and noisy visually-similar classes |
-| 17 | 320 px for leaf, 224 px for UAV | Leaf at 320 improved over 224; UAV frames are huge and fold runs must stay cheap (limitation: lesions may be lost) |
-| 18 | Early stopping on val macro-F1, but report CV | Validation sets are small (about 276 leaf images; 1-2 videos per UAV class) and noisy |
-| 19 | Flip TTA | Cheap, small consistent gain; images have no canonical orientation |
-| 20 | Ensemble of different architectures | Different models make different errors; this gave the largest gain (+3 points) |
-| 21 | Never score all fold models together on the dataset | Every image was in the training set of most fold models: inflated score |
-| 22 | Audit before training (step 5) | A 1-NN lookup and date-holdout tell you what a score actually proves |
-| 23 | No single-split headline for UAV | With 9-13 videos per class, a single split can leave a class empty in val or test (it did) |
-| 24 | Test-evaluation log | Makes repeated test looks visible and discourages tuning on test |
-| 25 | Checkpoint name includes `_cutmix`, JSON sidecar | A variant once overwrote the baseline checkpoint; sidecar lets step 8 pick the best-val model without loading weights |
-| 26 | Own pHash implementation (OpenCV DCT) | Removes the `imagehash` dependency |
-| 27 | Hard assertions and warnings in step 1 | Leakage should stop the pipeline, not appear later as a good score |
-| 28 | Copy `artifacts/` to Drive **without** `cache/` | The cache (about 1.3 GB) is rebuilt in minutes; models, reports and features are what a Colab reset destroys |
+| 1 | Split once, in the manifest, on metadata only | Prevents later steps from silently creating different splits |
+| 2 | Merge perceptual-hash clusters with parsed video/source groups | pHash alone did not capture all correlated UAV frames |
+| 3 | Hash transformed versions | Duplicates can appear rotated or mirrored |
+| 4 | Drop identical bytes under conflicting labels | Such samples cannot consistently represent two classes |
+| 5 | Stratified group K-fold with fixed folds | Preserves class balance while keeping correlated groups together |
+| 6 | Cross-validation for the main leaf result | Gives a tighter estimate than relying on one 20 % split |
+| 7 | Keep each test fold untouched during model selection | Prevents direct test-fold tuning |
+| 8 | Macro-F1 as the primary metric | Leaf data has approximately 5× class imbalance |
+| 9 | Bootstrap over clusters | Images within the same cluster are not independent |
+| 10 | One cache + one feature file | Prevents row-order/split inconsistencies |
+| 11 | Fit transforms only on training data | Prevents preprocessing leakage |
+| 12 | GPU-resident data and GPU augmentation | Reduces the CPU data-loading bottleneck on Colab |
+| 13 | Avoid hue jitter | Colour changes can remove or alter disease-relevant cues |
+| 14 | Frozen warm-up + separate backbone/head learning rates | Protects pretrained representations during initial adaptation |
+| 15 | Use a controlled fine-tuning schedule | Earlier scheduling experiments showed instability around backbone unfreezing |
+| 16 | Class-weighted loss + label smoothing | Handles imbalance and visually similar/noisy classes |
+| 17 | 320 px leaf / 224 px UAV | Leaf benefited from higher resolution; UAV runs needed to remain computationally practical |
+| 18 | Early stopping on validation macro-F1 | Small validation sets can be noisy |
+| 19 | Flip TTA | Cheap augmentation at inference with no canonical image orientation |
+| 20 | Ensemble different architectures | Different models make complementary errors |
+| 21 | Never score all fold models together on the same CV data | Most images were seen during training by most fold models |
+| 22 | Audit before trusting the headline score | 1-NN and date-holdout reveal whether the task is dominated by similarity/session |
+| 23 | No single-split headline for UAV | Few independent videos can make a single split unstable or unrepresentative |
+| 24 | Test-evaluation logging | Makes repeated test evaluation visible |
+| 25 | Separate CutMix checkpoint names | Prevents variants from overwriting baseline checkpoints |
+| 26 | Own DCT-based pHash implementation | Keeps duplicate detection under project control |
+| 27 | Hard leakage assertions | Leakage should stop the pipeline rather than appear later as a high score |
+| 28 | Save artifacts without the large cache when backing up | The cache can be rebuilt; models/reports/features are more expensive to lose |
 
 ---
 
@@ -172,32 +405,75 @@ Predicts a file or folder. Several `--ckpt` files give a probability-averaged en
 
 | Experiment | Outcome |
 |---|---|
-| Random frame split on UAV (v1) | 0.99 macro-F1: leakage; discarded |
-| pHash-only grouping (UAV) | Still left about 90 % of val/test frames sharing a video with train |
-| Video-grouped 3-fold CV (UAV) | CNN 0.876, classical 0.909; 1-NN lookup 0.873: no evidence of learning beyond similarity |
-| Leave-one-date-out (UAV) | Recall 0.00-1.00 by block; about 0.7 for large blocks |
-| EfficientNet-B0 at 320 px (leaf) | 0.733 pooled 5-fold |
-| + CutMix, ConvNeXt-Tiny, ensembling (leaf) | 0.742 (2 models), 0.761 (3 models) |
-| DINOv2-S/14 frozen features + SVC (leaf, notebook-only experiment) | 0.684 alone; 0.749 when averaged with the baseline CNN; superseded by the 3-CNN ensemble |
+| Random frame split on UAV (v1) | ≈0.99 macro-F1: leakage; discarded |
+| pHash-only grouping (UAV) | Still left roughly 90 % of evaluation frames sharing a video with training |
+| Video-grouped 3-fold CV (UAV) | CNN 0.876, classical 0.909; 1-NN 0.873 |
+| Mean-RGB-only UAV probe | 0.65–0.72 macro-F1, above chance |
+| Leave-one-date-out UAV analysis | Recall varied from 0.00–1.00 by block; large blocks were around 0.67–0.76 |
+| EfficientNet-B0 at 320 px (leaf) | 0.733 pooled 5-fold macro-F1 |
+| EfficientNet-B0 + CutMix ensemble | 0.742 pooled 5-fold macro-F1 |
+| DINOv2-S/14 frozen features + SVC | 0.684 pooled macro-F1 |
+| 50/50 CNN + DINOv2 probability blend | 0.749 pooled macro-F1 |
+| EfficientNet-B0 + CutMix + ConvNeXt-Tiny | 0.761 pooled macro-F1 |
+| 3-model leaf ensemble | 0.775 accuracy / 0.761 macro-F1 |
 
-Because several variants were compared on the same folds, treat the best number as slightly optimistic.
+The DINOv2 experiment was retained as a documented comparison but was superseded by the 3-CNN ensemble.
+
+Because several model variants were compared on the same folds, the final best number should be treated as an experimental benchmark rather than a completely independently selected estimate.
 
 ---
 
 ## 6. Known limitations and how to extend
 
-* **More UAV data is the only real fix for the UAV confound**: several videos per class, recorded on the *same days and fields*.
-* **UAV resolution:** tile the frame (e.g. 3 x 3 crops) and train at tile level, keeping all tiles of a video in one fold. Not implemented as a training option; `10_predict.py --tile-grid` does tiling at inference only.
-* **Tune on validation only.** If you try more variants, compare them on validation or in a fresh nested CV, not on the pooled test folds.
-* **Deployment cost:** the full ensemble is 15 checkpoints (5 folds x 3 models). Pick one fold's three models, or the best-validation fold, for a lighter service.
+- **UAV data volume and independence:** the available UAV data contains only a small number of independent videos/source groups. More videos from the same fields and dates are needed to establish robust disease-level generalisation.
+- **UAV acquisition confounding:** classes are strongly associated with recording dates/sessions. Grouping by video removes obvious frame leakage but does not eliminate session-level confounding.
+- **UAV nearest-neighbour performance:** a training-free 1-NN lookup reaches a score close to the trained CNN, showing that visual/source similarity explains a substantial part of the measured performance.
+- **UAV resolution:** 224 px processing may lose small lesions or subtle disease structures.
+- **Leaf class imbalance:** Frog-eye and Septoria remain substantially harder than Healthy and Mosaic.
+- **External validation:** the strongest next experiment is evaluation on an independent soybean disease dataset or newly collected field data.
+- **UAV tiling:** `10_predict.py --tile-grid` supports tiled inference, but a fully trained multi-scale/tile-level UAV training strategy is future work.
+- **Interpretability:** Grad-CAM or related methods can be added to check whether CNN predictions rely on disease-relevant regions.
+- **Hyperparameter search:** broader sweeps were avoided because of the available compute budget.
+- **Advisory layer:** the current work performs image-based recognition; it does not yet provide validated agronomic treatment or pesticide recommendations.
 
-## 7. Troubleshooting
+The most important scientific extension for UAV data is not simply a larger model. It is collecting multiple videos per class across shared fields and dates, followed by field/flight/date-level evaluation.
 
-| Symptom | Fix |
-|---|---|
-| `cache / manifest mismatch` | Re-run `02_cache_images.py --force` after changing the manifest |
-| `SOYA_ROOT` / "No images found" | Point `--data-root` or `SOYA_ROOT` at the folder that **contains** both dataset folders; unzip the class zips |
-| CUDA out of memory (ConvNeXt, 384 px) | Add `--batch-size 32` |
-| Class count warning in step 1 | Check that sub-folders are the class folders and nothing extra was unzipped |
-| `09_cv_summary.py` finds 0 or several files | Pass a longer or more exact `--model-tag` (e.g. `cnn_ensemble3`) |
-| A fold's validation score is far from its test score (UAV) | Expected: validation holds 1-2 videos per class |
+---
+
+## Final project interpretation
+
+The leaf experiments provide the strongest evidence of disease-recognition capability in the current dataset.
+
+The UAV experiments are intentionally presented differently. Their purpose is partly to demonstrate how much apparent performance changes when evaluation respects video grouping and acquisition structure.
+
+Therefore:
+
+**Leaf:**
+
+```
+cleaned data
+    ↓
+5-fold CV
+    ↓
+model comparison
+    ↓
+3-CNN ensemble
+    ↓
+0.761 macro-F1
+```
+
+**UAV:**
+
+```
+video grouping
+    ↓
+3-fold CV
+    ↓
+CNN / classical / 1-NN comparison
+    ↓
+date-holdout + RGB audit
+    ↓
+high score, but limited generalisation evidence
+```
+
+That distinction is a deliberate part of the project's methodology rather than a weakness hidden from the results.
