@@ -11,7 +11,7 @@ It cleans and splits the data, builds hand-crafted and frozen-CNN features, trai
 
 > **Scope of this README.** It documents the code that is committed in this repository: a **single stratified, cluster-aware train / val / test split** with model selection on val and one final test evaluation.
 >
-> The results in `soya_run.ipynb` (5-fold leaf CV, UAV grouped CV, audit, ensembles) were produced by an **extended version of the pipeline that is not in this repo**. See [What is not in this repo](#what-is-not-in-this-repo) before trying to run the notebook.
+> The results in `soya_run.ipynb` (5-fold leaf CV, UAV grouped CV, audit, ensembles) were produced by an **extended version of the pipeline that is not in this repo**. See [Notebook and extended experiments](#notebook-and-extended-experiments) before trying to run the notebook.
 
 ---
 
@@ -186,19 +186,11 @@ A training-free 1-NN lookup matches the trained CNN, and leave-one-date-out reca
 
 ---
 
-## What is not in this repo
+## Notebook and extended experiments
 
-The notebook and the results above rely on features that the committed scripts do not have:
+`soya_run.ipynb` is the record of the full experimental run behind the results above. It drives an extended version of these scripts (fixed CV folds, a split audit, pooled out-of-fold summaries, CutMix, ConvNeXt-Tiny and multi-checkpoint ensembling) that it loads from `soya_pipeline.zip` on Google Drive. The DINOv2 features, the SVC grid search and the probability blending are written inline in the notebook itself. Script numbering differs slightly (the notebook's `06_train_classical.py`, `07_finetune_cnn.py` and `08_evaluate.py` are `05_train_classical.py`, `06_finetune_cnn.py` and `07_evaluate_test.py` here).
 
-- `05_audit_split.py` (source-group overlap, nearest-train similarity, 1-NN probe, mean-RGB probe, leave-one-date-out)
-- `09_cv_summary.py` and `metrics.py` (pooled out-of-fold metrics, cluster-bootstrap helper)
-- `10_predict.py` with multi-checkpoint ensembling
-- `--fold` / `--folds` options, fixed CV folds in the manifest, and the per-fold artifact folders
-- video/source-group parsing from UAV file names (here, clusters come from pHash only)
-- `--cutmix` and the `convnext_tiny` backbone, and ensembling of several checkpoints
-- script names: the notebook calls `06_train_classical.py`, `07_finetune_cnn.py`, `08_evaluate.py`; here these are `05_train_classical.py`, `06_finetune_cnn.py`, `07_evaluate_test.py`
-
-Also, the notebook downloads its code from a private Drive zip (`soya_pipeline.zip`), not from this repository.
+Until the extended scripts are committed, the notebook documents those results rather than running against this repository, and the scripts here cover the single-split baseline.
 
 ---
 
