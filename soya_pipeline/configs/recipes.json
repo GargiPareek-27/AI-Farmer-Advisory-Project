@@ -1,0 +1,53 @@
+{
+  "leaf_ensemble3": {
+    "description": "Leaf, 5-fold CV: EfficientNet-B0 + EfficientNet-B0/CutMix + ConvNeXt-Tiny, probability-averaged, flip TTA. Reported pooled macro-F1 0.761.",
+    "dataset": "leaf",
+    "img_size": 320,
+    "folds": 5,
+    "train_args": [
+      "--epochs",
+      "30",
+      "--patience",
+      "8"
+    ],
+    "cnn": [
+      {
+        "model": "efficientnet_b0",
+        "cutmix": 0.0,
+        "extra": []
+      },
+      {
+        "model": "efficientnet_b0",
+        "cutmix": 1.0,
+        "extra": []
+      },
+      {
+        "model": "convnext_tiny",
+        "cutmix": 0.0,
+        "extra": [
+          "--lr-backbone",
+          "1e-4"
+        ]
+      }
+    ]
+  },
+  "leaf_baseline": {
+    "description": "Leaf, 5-fold CV: single EfficientNet-B0 at 320 px with flip TTA. Reported pooled macro-F1 0.733.",
+    "dataset": "leaf",
+    "img_size": 320,
+    "folds": 5,
+    "train_args": [
+      "--epochs",
+      "30",
+      "--patience",
+      "8"
+    ],
+    "cnn": [
+      {
+        "model": "efficientnet_b0",
+        "cutmix": 0.0,
+        "extra": []
+      }
+    ]
+  }
+}

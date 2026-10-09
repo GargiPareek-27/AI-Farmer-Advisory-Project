@@ -1,0 +1,17 @@
+# data, caches and trained weights (rebuilt by the pipeline; publish weights via GitHub Releases / Hugging Face)
+artifacts/
+data/
+dummy_data/
+*.pt
+*.npy
+*.joblib
+*.zip
+
+# python / tooling
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+.DS_Store

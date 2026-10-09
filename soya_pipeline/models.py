@@ -9,6 +9,7 @@ import torchvision.models as tvm
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 HEAD_ATTR = {"mobilenet_v3_large": "classifier", "efficientnet_b0": "classifier",
+             "efficientnet_b2": "classifier", "convnext_tiny": "classifier",
              "resnet18": "fc", "resnet50": "fc"}
 
 
@@ -31,18 +32,20 @@ def build_model(name: str, n_classes: int, pretrained: bool = True) -> nn.Module
     return m
 
 
-def build_embedder(name: str, pretrained: bool = True) -> nn.Module:
-    m = _base(name, pretrained)
+def build_embedder(name: str) -> nn.Module:
+    """Pretrained backbone without its classifier -> (N, D) embeddings (DINOv2: CLS token)."""
+    if name.startswith("dinov2"):
+        return torch.hub.load("facebookresearch/dinov2", name, trust_repo=True).eval()      # input side must be a multiple of 14
+    m = _base(name, True)
     setattr(m, HEAD_ATTR[name], nn.Identity())
-    return m
+    return nn.Sequential(m, nn.Flatten()).to(memory_format=torch.channels_last)   # Flatten: ConvNeXt keeps (N,D,1,1)
 
 
 def split_backbone_head(model: nn.Module, name: str):
     head = getattr(model, HEAD_ATTR[name])
     head_ids = {id(p) for p in head.parameters()}
     backbone = [p for p in model.parameters() if id(p) not in head_ids]
-    backbone_children = [c for c in model.children() if c is not head]
-    return backbone, list(head.parameters()), backbone_children
+    return backbone, list(head.parameters()), [c for c in model.children() if c is not head]
 
 
 @torch.no_grad()
@@ -53,7 +56,7 @@ def forward_batches(model, X, device, mean, std, bs: int = 128, tta: bool = Fals
     std_t = torch.tensor(std, device=device).view(1, 3, 1, 1)
     outs = []
     for i in range(0, len(X), bs):
-        xb = torch.from_numpy(np.ascontiguousarray(X[i:i + bs])).to(device)
+        xb = torch.from_numpy(np.array(X[i:i + bs])).to(device)          # np.array copies: memmap slices are read-only
         xb = xb.permute(0, 3, 1, 2).float().div_(255.0)
         xb = ((xb - mean_t) / std_t).contiguous(memory_format=torch.channels_last)
         with torch.autocast(device_type=device.type, enabled=amp and device.type == "cuda"):

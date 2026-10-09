@@ -1,48 +1,46 @@
 #!/usr/bin/env python
-"""Step 2 - Decode + resize every image ONCE and cache as uint8 .npy (big training-time saver).
+"""Step 2 - Decode + resize every image ONCE into a single uint8 array (rows = manifest order).
 
-After this step no script touches the original JPEGs again, so each epoch / experiment
-skips JPEG decoding entirely. Normalisation statistics are computed on TRAIN ONLY.
+All later steps (features, training, any fold / split) just index rows of this array, so no
+script touches the original JPEGs again and nothing has to be re-cached per split.
+Images are streamed straight into a memory-mapped file, so peak memory is one image, not two copies of the array.
 """
-import json
+import os
 
 import numpy as np
 from joblib import Parallel, delayed
 
-from common import Paths, common_args, load_resized, split_df
+from common import Paths, common_args, load_manifest, load_resized, meta_state, write_meta
 
 
-def channel_stats(X):
-    s, ss, n = np.zeros(3), np.zeros(3), 0
-    for i in range(0, len(X), 256):
-        c = np.asarray(X[i:i + 256], dtype=np.float64) / 255.0
-        s += c.sum((0, 1, 2))
-        ss += (c ** 2).sum((0, 1, 2))
-        n += c.shape[0] * c.shape[1] * c.shape[2]
-    mean = s / n
-    return mean.tolist(), np.sqrt(np.maximum(ss / n - mean ** 2, 0)).tolist()
+def load_named(path, size):
+    try:
+        return load_resized(path, size)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"cannot read {path}: {e!r}") from e
 
 
 def main():
-    args = common_args(__doc__.splitlines()[0],
-                       lambda p: p.add_argument("--force", action="store_true"))
+    args = common_args(__doc__.splitlines()[0], lambda p: p.add_argument("--force", action="store_true"))
     P = Paths(args)
-    for split in ("train", "val", "test"):
-        out = P.x_path(split)
-        df = split_df(P, split)
-        if out.exists() and not args.force:
-            print(f"[skip] {out} exists")
-            continue
-        paths = [P.img_dir / r for r in df.relpath]
-        arrs = Parallel(n_jobs=args.n_jobs, batch_size=16, verbose=1)(
-            delayed(load_resized)(p, args.img_size) for p in paths)
-        X = np.stack(arrs)
-        np.save(out, X)
-        print(f"{split}: {X.shape} -> {out} ({X.nbytes / 1e6:.0f} MB)")
-        if split == "train":
-            mean, std = channel_stats(X)
-            P.stats_json.write_text(json.dumps({"mean": mean, "std": std, "n": len(X)}))
-            print(f"train-only mean={np.round(mean, 4)} std={np.round(std, 4)}")
+    if P.x_path.exists() and not args.force and meta_state(P, P.x_path) == "ok":
+        print(f"[skip] {P.x_path} is up to date (use --force to rebuild)")
+        return
+    paths = [P.img_dir / r for r in load_manifest(P).relpath]
+    S, n = args.img_size, len(paths)
+    tmp = P.x_path.with_name(f"all_x{S}.partial.npy")
+    out = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(n, S, S, 3))
+    stream = Parallel(n_jobs=args.n_jobs, batch_size=16, return_as="generator")(
+        delayed(load_named)(p, S) for p in paths)
+    for i, arr in enumerate(stream):
+        out[i] = arr
+        if (i + 1) % 500 == 0 or i + 1 == n:
+            print(f"  cached {i + 1}/{n}", flush=True)
+    out.flush()
+    del out
+    os.replace(tmp, P.x_path)                              # the final name only ever points at a complete file
+    write_meta(P, P.x_path, size=S, n=n)
+    print(f"({n}, {S}, {S}, 3) -> {P.x_path} ({n * S * S * 3 / 1e6:.0f} MB)")
 
 
 if __name__ == "__main__":
