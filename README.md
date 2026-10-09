@@ -55,23 +55,6 @@ Frog-eye and Septoria are the weak classes. All tables, the confusion matrix and
 
 ---
 
-## Scope and limitations
-
-* **Leaf photos only.** The UAV half of the source dataset was explored earlier and is excluded; its scores could not be shown to generalise.
-* **Not a diagnostic or advisory authority.** The classifier outputs a class label. It has no "not soybean / not sure" output, no severity estimate and
-  no treatment logic. Predictions should be confirmed by an agronomist.
-* **Independence between photos cannot be verified.** Leaf file names carry no plant, field or session id, so every image is its own group.
-  Perceptual hashing found no near-duplicate pairs, but that cannot guarantee that photos of the same plant do not sit on both sides of a split.
-* **No external validation dataset.** All results come from one dataset, evaluated by cross-validation.
-* **Weaker classes:** Frog-eye leaf spot (F1 0.561) and Septoria brown spot (0.621).
-* **The ensemble figure may be somewhat optimistic:** several variants (single models, an ensemble, a DINOv2 experiment and a blend) were compared on the same folds.
-* **GPU training is not bit-exact:** expect about +/-0.01 macro-F1 between reruns.
-* **Test coverage:** the PyTorch training / evaluation paths are not covered by CI; the notebook's GPU smoke test and the full run exercise them.
-* **Reproducibility status:** the numbers above come from one recorded Colab execution run from the unpacked project folder in Google Drive. An independent
-  clean-ZIP reproduction (with the zip's md5 recorded) is **pending**; see `soya_pipeline/docs/RESULTS.md`.
-
----
-
 ## Reproduce / run
 
 Full instructions are in [`soya_pipeline/README.md`](soya_pipeline/README.md). In short:
