@@ -1,0 +1,6 @@
+# Lint: real errors only (syntax errors, undefined names, unused imports / variables). No style rules.
+line-length = 140
+extend-exclude = ["notebooks"]
+
+[lint]
+select = ["E9", "F"]
